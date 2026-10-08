@@ -1,0 +1,12 @@
+apify_client==2.0.0
+langchain-core==1.0.1
+langchain-openai==1.0.1
+langgraph==1.0.2
+llama-index-core==0.14.6
+llama-index-embeddings-azure-openai==0.4.1
+numpy==2.2.5
+openai==1.109.1
+pandas==2.2.3
+pydantic==2.11.7
+python-dotenv==1.1.0
+xlsxwriter==3.2.5
