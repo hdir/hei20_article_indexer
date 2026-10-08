@@ -1,4 +1,4 @@
-# hei20_articles
+# hei20_article_indexer
 
 Script som bygger vektorindeksen **hvaerinnafor** fra artikkellisten i
 `startUrls.json`.
