@@ -10,7 +10,8 @@ from typing_extensions import TypedDict
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
-from apify_client import ApifyClient
+import requests
+from bs4 import BeautifulSoup
 from langchain_core.runnables import RunnableLambda
 from langgraph.graph import StateGraph, START, END
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
@@ -21,6 +22,26 @@ from prompts import severity_for_query_prompt, qa_subject_no_prompt, categorize_
 
 MAX_METADATA_LENGTH = 1000
 _POSSIBLE_META_IDS = ("doc_id", "from_doc_id", "document_id", "source_id", "file_id", "url")
+
+# Browser-like headers; some sites return 403 to a bot-looking User-Agent.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "nb-NO,nb;q=0.9,no;q=0.8,en;q=0.7",
+}
+
+# Elements stripped before text extraction (cookie banners, menus, chat widgets, ...)
+_REMOVE_SELECTORS = [
+    "script", "style", "noscript", "svg", "nav", "header", "footer", "form", "aside",
+    '[role="alert"]', '[role="banner"]', '[role="dialog"]', '[role="alertdialog"]',
+    '[role="button"]', '[aria-modal="true"]', '.hint', '#cookie-consent',
+    '.element-invisible.element-focusable',
+    '[class*="ChatCard__Wrapper"]', '[class*="QuestionSearchContainer"]',
+    '[class*="Youtube__YouTubeContainer"]', '.mui-style-h5fkc8',
+]
 
 CATEGORIES = {
     "Eksen": ["eks", "eksen", "eks-kjæreste", "ex", "skal jeg gå tilbake til eksen", "følelser for eksen", "forelsket i eksen", "hvordan få eksen tilbake", "vinne tilbake eksen", "jeg savner eksen min", "sammen med eksen igjen", "tenker på eksen", "eksen savner meg", "når eksen angrer", "eksen vil ha meg tilbake", "venn med eksen", "hvordan komme over eksen"],
@@ -55,9 +76,8 @@ class State_buildIndex(TypedDict, total=False):
     index: VectorStoreIndex
     similarity_top_k: int
     similarity_cutoff: float
-    content_type: Literal["markdown_content", "html_content"]
     name: str
-    scraping_dir: str
+    start_urls_file: str
     storage: str
     documents: List[Document]
     answered_questions: List[Document]
@@ -171,21 +191,40 @@ def _iter_meta_rows(meta, base_path: str = ""):
             "value_len": len(meta) if isinstance(meta, str) else None,
         }
 
-def _load_run_input(item: str, scraping_dir: str) -> Dict[str, Any]:
-    """
-    Reads <scraping_dir>/<item>/config.json and injects startUrls.json as 'startUrls'.
-    """
-    with open(os.path.join(scraping_dir, item, 'config.json'), 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    with open(os.path.join(scraping_dir, item, 'startUrls.json'), 'r', encoding='utf-8') as f:
-        start_urls = json.load(f)
+def _load_start_urls(path: str) -> List[str]:
+    """Reads startUrls.json ([{"url": ..., "method": "GET"}, ...]) and drops duplicates."""
+    with open(path, 'r', encoding='utf-8') as f:
+        entries = json.load(f)
+    urls = [e["url"] if isinstance(e, dict) else str(e) for e in entries]
+    return list(dict.fromkeys(urls))
 
-    run_input = config.get(item, {})
-    run_input['startUrls'] = start_urls
-    return run_input
+def _fetch_article(url: str) -> Dict[str, Any]:
+    """Fetches a page and returns {"url", "text", "metadata": {title, keywords, description}}."""
+    resp = requests.get(url, timeout=30, headers=_BROWSER_HEADERS)
+    resp.raise_for_status()
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-def _dataset_items(client: ApifyClient, dataset_id: str) -> List[Dict[str, Any]]:
-    return list(client.dataset(dataset_id).iterate_items())
+    def _meta(name: str) -> str:
+        tag = soup.find("meta", attrs={"name": name}) or soup.find("meta", attrs={"property": f"og:{name}"})
+        return (tag.get("content") or "").strip() if tag else ""
+
+    title = soup.title.string.strip() if soup.title and soup.title.string else ""
+    if not title and soup.find("h1"):
+        title = soup.find("h1").get_text(strip=True)
+    metadata = {"title": title or "Untitled", "keywords": _meta("keywords"), "description": _meta("description")}
+
+    for selector in _REMOVE_SELECTORS:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    main = soup.select_one("main#main-content") or soup.find("main") or soup.find("article") or soup.body or soup
+    text = main.get_text(separator="\n", strip=True)
+    if not text.strip():
+        raise ValueError(f"No textual content extracted from {url}")
+
+    return {"url": resp.url or url, "text": text, "metadata": metadata}
 
 def _truncate_metadata(metadata: dict) -> dict:
     max_lengths = {
@@ -235,24 +274,17 @@ def _format_context_from_nodes(nodes, max_chars_per_node=3000, max_nodes=100) ->
         parts.append(f"[{_preferred_display_id(node)}]\n{textwrap.dedent(txt[:max_chars_per_node])}")
     return "\n\n".join(parts)
 
-def _transform_dataset_item(doc_item, content_type) -> Document:
-    meta = doc_item.get('metadata', {})
+def _transform_article(article: Dict[str, Any]) -> Document:
+    meta = article.get('metadata', {})
     title = meta.get('title', 'Untitled')
-    keywords = meta.get('keywords', 'Untitled')
-    description = meta.get('description', 'Untitled')
-
-    markdown_content = doc_item.get("markdown", "") or ""
-    if content_type == "markdown_content":
-        text_content = markdown_content
-    else:
-        text_content = doc_item.get("text", "") or ""
+    text_content = article.get("text", "") or ""
 
     # remove all text after split_phrase
     result = text_content.partition("Fikk du svar på det du lurte på?")[0]
 
     # fix for getting correct title from Hva er innafor:
     if title == "Hva er innafor - Helsenorge":
-        match = re.search(r"Spørsmål:\s*(.*)", markdown_content, re.DOTALL)
+        match = re.search(r"Spørsmål:\s*(.*)", text_content, re.DOTALL)
         if match:
             title = match.group(1).splitlines()[0]
             print(f'title fra spørsmål:{title}')
@@ -260,10 +292,10 @@ def _transform_dataset_item(doc_item, content_type) -> Document:
             print("No 'Spørsmål' section found.")
 
     metadata = _truncate_metadata({
-        "url": doc_item.get("url", "Unknown URL"),
+        "url": article.get("url", "Unknown URL"),
         "title": title,
-        "keywords": keywords,
-        "description": description,
+        "keywords": meta.get('keywords', ''),
+        "description": meta.get('description', ''),
     })
     metadata["category"] = ""
     metadata["severity"] = ""
@@ -287,28 +319,23 @@ def _classify_relevancy(score: float, thresholds: dict[str, float]) -> str:
 
 # === Node functions ===
 
-def apify_call_load_documents(state: State_buildIndex) -> dict:
-    """
-    Runs the 'apify/website-content-crawler' actor with config.json + startUrls.json,
-    fetches the dataset items and turns them into Documents.
-    """
-    item = state["name"]
-    run_input = _load_run_input(item, state["scraping_dir"])
+def load_documents(state: State_buildIndex) -> dict:
+    """Fetches every article in startUrls.json and turns it into a Document."""
+    urls = _load_start_urls(state["start_urls_file"])
+    logging.info(f"Fetching {len(urls)} articles from {state['start_urls_file']}")
 
-    token = os.getenv('APIFY_TOKEN')
-    if not token:
-        raise RuntimeError("Missing APIFY_TOKEN in environment.")
+    documents = []
+    for url in urls:
+        try:
+            documents.append(_transform_article(_fetch_article(url)))
+            logging.info(f"OK   {url}")
+        except Exception as e:
+            logging.warning(f"FAIL {url}: {e}")
 
-    client = ApifyClient(token)
-    run = client.actor("apify/website-content-crawler").call(run_input=run_input)
-    dataset_id = (run or {}).get("defaultDatasetId")
-    if not dataset_id:
-        raise RuntimeError("No defaultDatasetId found on apify run result.")
+    if not documents:
+        raise RuntimeError("No articles could be fetched.")
 
-    raw_items = _dataset_items(client, dataset_id)
-    documents = [_transform_dataset_item(it, content_type=state["content_type"]) for it in raw_items]
-
-    print(f'------------ apify run OK: {len(documents)} documents -----------')
+    print(f'------------ fetched {len(documents)}/{len(urls)} articles -----------')
     return {"documents": documents}
 
 def create_metadata_for_documents(state: State_buildIndex) -> dict:
@@ -458,15 +485,15 @@ def create_log_excel(state: State_buildIndex) -> dict:
 # === Workflow ===
 builder = StateGraph(State_buildIndex)
 
-builder.add_node("apify_call_load_documents", apify_call_load_documents)
+builder.add_node("load_documents", load_documents)
 builder.add_node("create_metadata_for_documents", create_metadata_for_documents)
 builder.add_node("persist_storage_for_documents", persist_storage_for_documents)
 builder.add_node("create_answered_questions", create_answered_questions)
 builder.add_node("persist_storage_for_answered_questions", persist_storage_for_answered_questions)
 builder.add_node("create_log_excel", create_log_excel)
 
-builder.add_edge(START, "apify_call_load_documents")
-builder.add_edge("apify_call_load_documents", "create_metadata_for_documents")
+builder.add_edge(START, "load_documents")
+builder.add_edge("load_documents", "create_metadata_for_documents")
 builder.add_edge("create_metadata_for_documents", "persist_storage_for_documents")
 builder.add_edge("persist_storage_for_documents", "create_answered_questions")
 builder.add_edge("create_answered_questions", "persist_storage_for_answered_questions")

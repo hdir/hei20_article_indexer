@@ -1,6 +1,6 @@
 """
 Bygger vektorindeksen for 'hvaerinnafor' basert på artikkellisten i
-scraping/hvaerinnafor/startUrls.json.
+startUrls.json.
 
 Resultat:
   <storage>/hvaerinnafor/          - indeks over artiklene
@@ -20,9 +20,10 @@ from workflow import build_hei_index_workflow, State_buildIndex
 
 def main():
     parser = argparse.ArgumentParser(description="Bygg vektorindeks fra startUrls.json")
-    parser.add_argument("--name", default="hvaerinnafor", help="Mappe under scraping/ med config.json og startUrls.json")
+    parser.add_argument("--name", default="hvaerinnafor", help="Navn på indeksen")
+    parser.add_argument("--start-urls", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "startUrls.json"),
+                        help="JSON-fil med artikkellisten")
     parser.add_argument("--storage", default="./blobstorage/chatbot/", help="Hvor indeksene lagres")
-    parser.add_argument("--content-type", default="html_content", choices=["html_content", "markdown_content"])
     args = parser.parse_args()
 
     load_dotenv(find_dotenv())
@@ -52,9 +53,8 @@ def main():
         "llm": llm,
         "similarity_top_k": 10,
         "similarity_cutoff": 0.75,
-        "content_type": args.content_type,
         "name": args.name,
-        "scraping_dir": os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraping"),
+        "start_urls_file": args.start_urls,
         "storage": args.storage,
         "documents": [],
     }

@@ -1,13 +1,13 @@
 # hei20_articles
 
 Script som bygger vektorindeksen **hvaerinnafor** fra artikkellisten i
-`scraping/hvaerinnafor/startUrls.json`.
+`startUrls.json`.
 
-Koden er hentet fra `vectorindex_server`, men inneholder kun det som trengs for selve indekseringsjobben.
+Koden er hentet fra `vectorindex_server` og `digiung_lab` (artikkelhenting), men inneholder kun det som trengs for selve indekseringsjobben. Ingen Apify.
 
 ## Hva scriptet gjør
 
-1. Crawler artiklene i `startUrls.json` med Apify (`apify/website-content-crawler`) og innstillingene i `config.json`.
+1. Henter hver artikkel i `startUrls.json` med `requests` og trekker ut teksten med BeautifulSoup. Menyer, cookie-bannere og chat-widgets fjernes. Duplikate URL-er hoppes over, og artikler som feiler logges og hoppes over.
 2. Lager metadata per artikkel med LLM: spørsmål artikkelen besvarer og kategori.
 3. Bygger og lagrer vektorindeksen for artiklene → `<storage>/hvaerinnafor/`.
 4. Fjerner nesten like spørsmål, svarer på hvert spørsmål med kildebelagt svar og setter alvorlighetsgrad.
@@ -33,13 +33,13 @@ Valgfrie argumenter:
 
 | Argument | Standard | Beskrivelse |
 |---|---|---|
-| `--name` | `hvaerinnafor` | Mappe under `scraping/` med `config.json` og `startUrls.json` |
+| `--name` | `hvaerinnafor` | Navn på indeksen |
+| `--start-urls` | `startUrls.json` | JSON-fil med artikkellisten |
 | `--storage` | `./blobstorage/chatbot/` | Hvor indeksene lagres |
-| `--content-type` | `html_content` | `html_content` (ren tekst) eller `markdown_content` |
 
 ## Endre artikkellisten
 
-Rediger `scraping/hvaerinnafor/startUrls.json`:
+Rediger `startUrls.json`:
 
 ```json
 [
