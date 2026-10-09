@@ -68,3 +68,4 @@ Etter hentingen ligger `scraping/scraped_pages.json` og `scraping/documents.xlsx
 | `prompts.py` | Prompter |
 | `psa_ssa_topics.json` | Kategorier brukt ved kategorisering av artikler |
 | `startUrls.json` | Artikkellisten |
+..
